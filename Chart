@@ -1,0 +1,125 @@
+//@version=5
+strategy("Backtest RRG (Chuẩn Việt Nam) + Filter RSI", shorttitle="RRG Backtest + RSI", overlay=false)
+
+// -----------------------------------------------------------------------------
+// 1. Tham số đầu vào
+// -----------------------------------------------------------------------------
+sym_bm       = input.symbol("VNINDEX", title="Mã tham chiếu")
+len_fast     = input.int(12, title="Chu kỳ ngắn (Fast MA)")
+len_slow     = input.int(26, title="Chu kỳ dài (Slow MA)")
+len_mom      = input.int(9, title="Chu kỳ động lượng (Signal MA)")
+
+// Tham số RSI cấu hình thêm
+len_rsi      = input.int(14, title="Chu kỳ RSI")
+rsi_max_buy  = input.int(40, title="Ngưỡng mua RSI tối đa", tooltip="Chỉ cho phép vào lệnh mua nếu RSI dưới hoặc bằng ngưỡng này")
+
+// Tùy chọn điều kiện mua và bán (Dropdown Menu)
+buy_condition  = input.string("Tăng giá", title="Điều kiện mở vị thế", options=["Tăng giá", "Tích lũy"])
+sell_condition = input.string("Suy yếu", title="Điều kiện đóng vị thế", options=["Suy yếu", "Giảm giá"])
+
+// -----------------------------------------------------------------------------
+// 2. Thiết lập thời gian (Date Range)
+// -----------------------------------------------------------------------------
+start_time = input.time(timestamp("2023-01-01T00:00:00"), title="Thời gian bắt đầu")
+end_time   = input.time(timestamp("2026-12-31T23:59:59"), title="Thời gian kết thúc")
+
+in_date_range = time >= start_time and time <= end_time
+
+// Lấy giá đóng cửa của mã tham chiếu (VNINDEX)
+bm_close = request.security(sym_bm, timeframe.period, close)
+
+// -----------------------------------------------------------------------------
+// 3. Tính toán các chỉ báo (RRG & RSI)
+// -----------------------------------------------------------------------------
+// Thuật toán RRG nội địa (MACD-style Ratio)
+ratio = close / bm_close
+
+rs1 = ta.sma(ratio, len_fast)
+rs2 = ta.sma(ratio, len_slow)
+rs_ratio = rs2 == 0 ? 100 : 100 * (rs1 / rs2)
+
+rm2 = ta.sma(rs_ratio, len_mom)
+rs_mom = rm2 == 0 ? 100 : 100 * (rs_ratio / rm2)
+
+// Tính toán chỉ báo RSI của cổ phiếu hiện tại
+src_rsi = close
+rsi_val = ta.rsi(src_rsi, len_rsi)
+
+// -----------------------------------------------------------------------------
+// 4. Phân tích vùng trạng thái (Quadrants)
+// -----------------------------------------------------------------------------
+is_leading   = rs_ratio > 100 and rs_mom > 100 // Tăng giá
+is_weakening = rs_ratio > 100 and rs_mom < 100 // Suy yếu
+is_lagging   = rs_ratio < 100 and rs_mom < 100 // Giảm giá
+is_improving = rs_ratio < 100 and rs_mom > 100 // Tích lũy
+
+// -----------------------------------------------------------------------------
+// 5. Logic Giao dịch (Backtest với bộ lọc RSI)
+// -----------------------------------------------------------------------------
+// Khởi tạo tín hiệu RRG thô (Chưa tính điều kiện RSI)
+rrg_buy_signal = false
+if buy_condition == "Tăng giá"
+    rrg_buy_signal := is_leading and not is_leading[1]
+else if buy_condition == "Tích lũy"
+    rrg_buy_signal := is_improving and not is_improving[1]
+
+// LOGIC LỌC: Tín hiệu mua chính thức phải thỏa mãn (Tín hiệu RRG) VÀ (RSI <= Ngưỡng cấu hình)
+buy_signal = rrg_buy_signal and rsi_val <= rsi_max_buy
+
+// Tín hiệu bán: Giữ nguyên theo chu kỳ RRG để thoát vị thế linh hoạt
+sell_signal = false
+if sell_condition == "Suy yếu"
+    sell_signal := is_weakening and not is_weakening[1]
+else if sell_condition == "Giảm giá"
+    sell_signal := is_lagging and not is_lagging[1]
+
+// Thực thi vào/ra lệnh dựa trên điều kiện lọc và khoảng thời gian
+if buy_signal and in_date_range
+    strategy.entry("Mua", strategy.long)
+
+if sell_signal and in_date_range
+    strategy.close("Mua", comment="Bán (" + sell_condition + ")")
+
+// Tự động chốt vị thế khi kết thúc chu kỳ kiểm tra
+if not in_date_range and strategy.position_size > 0
+    strategy.close_all(comment="Hết hạn test")
+
+// -----------------------------------------------------------------------------
+// 6. Hiển thị & Đồ họa (Plotting)
+// -----------------------------------------------------------------------------
+hline(100, title="Trục 100", color=color.gray, linestyle=hline.style_dashed)
+
+plot(rs_ratio, title="Tỷ lệ RS", color=color.blue, linewidth=2)
+plot(rs_mom, title="Động lượng RS", color=color.red, linewidth=2)
+
+// Tô màu nền biểu đồ phụ theo vùng trạng thái RRG
+bg_color = is_leading   ? color.new(color.green, 90) :
+           is_weakening ? color.new(color.yellow, 90) :
+           is_lagging   ? color.new(color.red, 90) :
+           is_improving ? color.new(color.blue, 90) : na
+bgcolor(bg_color, title="Màu nền trạng thái")
+
+// Đánh dấu trực quan điểm Mua/Bán trên chart
+// Điểm mua sẽ chỉ xuất hiện khi thỏa mãn cả bộ lọc RSI <= 40
+plotshape(buy_signal and in_date_range, title="Điểm mua hợp lệ", style=shape.triangleup, location=location.bottom, color=color.green, size=size.small)
+plotshape(sell_signal and in_date_range, title="Điểm bán", style=shape.triangledown, location=location.top, color=color.red, size=size.small)
+
+// -----------------------------------------------------------------------------
+// 7. Bảng ghi chú trạng thái (Góc phải dưới)
+// -----------------------------------------------------------------------------
+var table status_table = table.new(position.bottom_right, 1, 1)
+
+if barstate.islast
+    string status_text = is_leading   ? "TĂNG GIÁ (RSI: " + str.tostring(math.round(rsi_val, 2)) + ")"  : 
+                         is_weakening ? "SUY YẾU (RSI: " + str.tostring(math.round(rsi_val, 2)) + ")"   : 
+                         is_lagging   ? "GIẢM GIÁ (RSI: " + str.tostring(math.round(rsi_val, 2)) + ")"  : 
+                         is_improving ? "TÍCH LŨY (RSI: " + str.tostring(math.round(rsi_val, 2)) + ")"  : "KHÔNG XÁC ĐỊNH"
+                         
+    color table_bg = is_leading   ? color.green : 
+                     is_weakening ? color.yellow : 
+                     is_lagging   ? color.red : 
+                     is_improving ? color.blue : color.gray
+                     
+    color text_color = is_weakening ? color.black : color.white
+
+    table.cell(status_table, 0, 0, status_text, text_color=text_color, bgcolor=table_bg, text_size=size.normal)
